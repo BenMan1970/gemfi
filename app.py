@@ -4,13 +4,12 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 import time
 import traceback 
-import requests # Pour appeler l'API Finnhub
+import requests 
 
 st.set_page_config(page_title="Scanner Confluence Forex (Finnhub)", page_icon="⭐", layout="wide")
 st.title("🔍 Scanner Confluence Forex Premium (Données Finnhub)")
 st.markdown("*Utilisation de l'API Finnhub pour les données de marché*")
 
-# --- Récupération Clé API Finnhub ---
 FINNHUB_API_KEY = None
 try:
     FINNHUB_API_KEY = st.secrets["FINNHUB_API_KEY"]
@@ -18,36 +17,20 @@ except KeyError:
     st.error("Erreur: Secret 'FINNHUB_API_KEY' non défini. Configurez vos secrets.")
     st.stop()
 
-if not FINNHUB_API_KEY: # Double vérification
+if not FINNHUB_API_KEY: 
     st.error("Clé API Finnhub non disponible après la lecture des secrets.")
-    st.stop()
+    st.stop() # Arrêter si la clé n'est pas chargée
 else:
     st.sidebar.success("Clé API Finnhub chargée.")
 
-# --- Liste des paires Forex (Format Finnhub) ---
-# IMPORTANT: Vérifie les symboles exacts sur Finnhub.
-# Exemples: 'OANDA:EUR_USD', 'FXCM:GBP_USD', etc.
-# Ou parfois des symboles agrégés comme 'FOREX:EURUSD' (moins courant pour l'intraday détaillé)
-# Je vais utiliser un format générique, mais tu devras peut-être les adapter.
-# Pour l'instant, je vais essayer sans préfixe de broker pour voir si Finnhub a des symboles agrégés.
-# Si cela ne fonctionne pas, il faudra trouver les bons préfixes (OANDA, FXCM, etc.)
 FOREX_PAIRS_FINNHUB = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
     "USD/CAD", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP"
-    # Pour XAU/USD, Finnhub peut l'avoir sous un symbole de commodité ou via un broker spécifique.
-    # Ex: 'OANDA:XAU_USD' ou un symbole de contrat futures.
-    # Je le laisse pour l'instant.
 ]
-# Fonction pour convertir le format 'EUR/USD' en 'EUR_USD' si nécessaire pour certains brokers
-def format_finnhub_symbol(pair_str, broker_prefix="OANDA"): # OANDA est souvent disponible
-    # Si le symbole contient déjà un ':', on suppose qu'il est déjà formaté
-    if ':' in pair_str:
-        return pair_str
-    # Sinon, on ajoute le préfixe et on remplace '/' par '_'
+def format_finnhub_symbol(pair_str, broker_prefix="OANDA"):
+    if ':' in pair_str: return pair_str
     return f"{broker_prefix}:{pair_str.replace('/', '_')}"
 
-
-# --- Fonctions d'indicateurs techniques (INCHANGÉES) ---
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
 def rma(s, p): return s.ewm(alpha=1/p, adjust=False).mean()
 def hull_ma_pine(dc, p=20):
@@ -85,59 +68,34 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
     elif ccl<cbn:sig=-1
     return sig
 
-# --- Fonction get_data utilisant Finnhub ---
-@st.cache_data(ttl=600) # Cache pour 10 minutes
+@st.cache_data(ttl=600) 
 def get_data_finnhub(pair_symbol_fh: str, resolution_fh: str = '60', num_days_history: int = 30):
     global FINNHUB_API_KEY
     if FINNHUB_API_KEY is None: st.error("FATAL: Clé API Finnhub non chargée."); print("FATAL: Clé API Finnhub non chargée."); return None
-    
-    # Finnhub attend des timestamps UNIX (secondes)
     to_timestamp = int(datetime.now(timezone.utc).timestamp())
     from_timestamp = int((datetime.now(timezone.utc) - timedelta(days=num_days_history)).timestamp())
-    
-    # Formater le symbole pour Finnhub (OANDA est un bon défaut)
     formatted_symbol = format_finnhub_symbol(pair_symbol_fh, broker_prefix="OANDA")
-
     print(f"\n--- Début get_data_finnhub: sym='{formatted_symbol}', res='{resolution_fh}', from={from_timestamp}, to={to_timestamp} ---")
-    
     base_url = "https://finnhub.io/api/v1/forex/candle"
-    params = {
-        "symbol": formatted_symbol,
-        "resolution": resolution_fh, # 1, 5, 15, 30, 60, D, W, M
-        "from": from_timestamp,
-        "to": to_timestamp,
-        "token": FINNHUB_API_KEY
-    }
+    params = {"symbol": formatted_symbol, "resolution": resolution_fh, "from": from_timestamp, "to": to_timestamp, "token": FINNHUB_API_KEY}
+    response = None # Initialiser pour le bloc finally
     try:
         response = requests.get(base_url, params=params)
-        response.raise_for_status() # Lèvera une exception pour les codes d'erreur HTTP 4xx/5xx
-        
+        response.raise_for_status() 
         data = response.json()
-        print(f"Données brutes Finnhub reçues pour {formatted_symbol}: {str(data)[:200]}...") # Afficher début de la réponse
-
-        if data.get('s') == 'no_data' or not data.get('c'): # 's' est le statut, 'c' est la liste des prix close
-            st.warning(f"Finnhub: Pas de données pour {formatted_symbol} (résolution {resolution_fh}). Réponse: {data.get('s')}")
+        print(f"Données brutes Finnhub reçues pour {formatted_symbol}: {str(data)[:200]}...")
+        if data.get('s') == 'no_data' or not data.get('c'): 
+            st.warning(f"Finnhub: Pas de données pour {formatted_symbol} (res {resolution_fh}). Réponse: {data.get('s')}")
             print(f"Finnhub: Pas de données pour {formatted_symbol}. Statut: {data.get('s')}")
             return None
-
-        df = pd.DataFrame({
-            'Open': data['o'],
-            'High': data['h'],
-            'Low': data['l'],
-            'Close': data['c'],
-            'Volume': data.get('v', [0]*len(data['c'])) # Volume peut ne pas être toujours présent pour Forex
-        })
-        # Les timestamps 't' sont des timestamps UNIX. Convertir en DatetimeIndex UTC.
+        df = pd.DataFrame({'Open': data['o'],'High': data['h'],'Low': data['l'],'Close': data['c'],'Volume': data.get('v', [0]*len(data['c']))})
         df.index = pd.to_datetime(data['t'], unit='s', utc=True)
-        
         if df.empty or len(df) < 55:
             st.warning(f"Données Finnhub insuffisantes/vides pour {formatted_symbol} ({len(df)} barres).")
             print(f"Données Finnhub insuffisantes/vides pour {formatted_symbol} ({len(df)} barres).")
             return None
-        
         print(f"Données pour {formatted_symbol} OK. Retour de {len(df)}l.\n--- Fin get_data_finnhub {formatted_symbol} ---\n")
-        return df.dropna(subset=['Open','High','Low','Close']) # S'assurer qu'OHLC ne sont pas NaN
-
+        return df.dropna(subset=['Open','High','Low','Close'])
     except requests.exceptions.HTTPError as http_err:
         st.error(f"Erreur HTTP Finnhub pour {formatted_symbol}: {http_err}")
         print(f"ERREUR HTTP FINNHUB {formatted_symbol}:\n{http_err}")
@@ -145,61 +103,79 @@ def get_data_finnhub(pair_symbol_fh: str, resolution_fh: str = '60', num_days_hi
         return None
     except Exception as e:
         st.error(f"Erreur inattendue get_data_finnhub pour {formatted_symbol}: {type(e).__name__}")
-        st.exception(e)
-        print(f"ERREUR INATTENDUE get_data_finnhub {formatted_symbol}:\n{traceback.format_exc()}")
-        return None
+        st.exception(e); print(f"ERREUR INATTENDUE get_data_finnhub {formatted_symbol}:\n{traceback.format_exc()}"); return None
 
-# --- Fonctions calculate_all_signals_pine et get_stars_pine (INCHANGÉES) ---
+# --- Fonction calculate_all_signals_pine (CORRIGÉE pour indentation et syntaxe) ---
 def calculate_all_signals_pine(data):
-    if data is None or len(data) < 60: print(f"calc_sig:Data None/courtes({len(data) if data is not None else 'None'})."); return None
-    req_c=['Open','High','Low','Close'];
-    if not all(c in data.columns for c in req_c): print("calc_sig:Cols OHLC manquantes."); return None
-    cl=data['Close'];hi=data['High'];lo=data['Low'];op=data['Open'];o4=(op+hi+lo+cl)/4;bc,brc,sd=0,0,{}
-    try:hmas=hull_ma_pine(cl,20);
-        if len(hmas)>=2 and not hmas.iloc[-2:].isna().any():h_v,h_p=hmas.iloc[-1],hmas.iloc[-2];
-            if h_v>h_p:bc+=1;sd['HMA']="▲"
-            elif h_v<h_p:brc+=1;sd['HMA']="▼"
-            else:sd['HMA']="─"
-        else:sd['HMA']="N/A"
-    except Exception as e:sd['HMA']=f"ErrHMA";print(f"Err HMA:{e}")
-    try:rsis=rsi_pine(o4,10);
-        if len(rsis)>=1 and not pd.isna(rsis.iloc[-1]):r_v=rsis.iloc[-1];sd['RSI_val']=f"{r_v:.0f}";
-            if r_v>50:bc+=1;sd['RSI']=f"▲({r_v:.0f})"
-            elif r_v<50:brc+=1;sd['RSI']=f"▼({r_v:.0f})"
-            else:sd['RSI']=f"─({r_v:.0f})"
-        else:sd['RSI']="N/A"
-    except Exception as e:sd['RSI']=f"ErrRSI";sd['RSI_val']="N/A";print(f"Err RSI:{e}")
-    try:adxs=adx_pine(hi,lo,cl,14);
-        if len(adxs)>=1 and not pd.isna(adxs.iloc[-1]):a_v=adxs.iloc[-1];sd['ADX_val']=f"{a_v:.0f}";
-            if a_v>=20:bc+=1;brc+=1;sd['ADX']=f"✔({a_v:.0f})"
-            else:sd['ADX']=f"✖({a_v:.0f})"
-        else:sd['ADX']="N/A"
-    except Exception as e:sd['ADX']=f"ErrADX";sd['ADX_val']="N/A";print(f"Err ADX:{e}")
-    try:hao,hac=heiken_ashi_pine(data);
-        if len(hao)>=1 and len(hac)>=1 and not pd.isna(hao.iloc[-1]) and not pd.isna(hac.iloc[-1]):
-            if hac.iloc[-1]>hao.iloc[-1]:bc+=1;sd['HA']="▲"
-            elif hac.iloc[-1]<hao.iloc[-1]:brc+=1;sd['HA']="▼"
-            else:sd['HA']="─"
-        else:sd['HA']="N/A"
-    except Exception as e:sd['HA']=f"ErrHA";print(f"Err HA:{e}")
-    try:shao,shac=smoothed_heiken_ashi_pine(data,10,10);
-        if len(shao)>=1 and len(shac)>=1 and not pd.isna(shao.iloc[-1]) and not pd.isna(shac.iloc[-1]):
-            if shac.iloc[-1]>shao.iloc[-1]:bc+=1;sd['SHA']="▲"
-            elif shac.iloc[-1]<shao.iloc[-1]:brc+=1;sd['SHA']="▼"
-            else:sd['SHA']="─"
-        else:sd['SHA']="N/A"
-    except Exception as e:sd['SHA']=f"ErrSHA";print(f"Err SHA:{e}")
-    try:ichis=ichimoku_pine_signal(hi,lo,cl);
-        if ichis==1:bc+=1;sd['Ichi']="▲"
-        elif ichis==-1:brc+=1;sd['Ichi']="▼"
-        elif ichis==0 and(len(data)<max(9,26,52)or(len(data)>0 and pd.isna(data['Close'].iloc[-1]))):sd['Ichi']="N/D"
-        else:sd['Ichi']="─"
-    except Exception as e:sd['Ichi']=f"ErrIchi";print(f"Err Ichi:{e}")
-    cfv=max(bc,brc);di="NEUTRE";
-    if bc>brc:di="HAUSSIER"
-    elif brc>bc:di="BAISSIER"
-    elif bc==brc and bc>0:di="CONFLIT"
-    return{'confluence_P':cfv,'direction_P':di,'bull_P':bc,'bear_P':brc,'rsi_P':sd.get('RSI_val',"N/A"),'adx_P':sd.get('ADX_val',"N/A"),'signals_P':sd}
+    if data is None or len(data) < 60:
+        print(f"calculate_all_signals: Données non fournies ou trop courtes ({len(data) if data is not None else 'None'} lignes).")
+        return None
+    required_cols = ['Open', 'High', 'Low', 'Close']
+    if not all(col in data.columns for col in required_cols):
+        print(f"calculate_all_signals: Colonnes OHLC manquantes.")
+        return None
+    
+    close = data['Close']; high = data['High']; low = data['Low']; open_price = data['Open']
+    ohlc4 = (open_price + high + low + close) / 4
+    bull_confluences, bear_confluences, signal_details_pine = 0, 0, {}
+
+    try: # 1. HMA
+        hma_series = hull_ma_pine(close, 20)
+        if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
+            hma_val = hma_series.iloc[-1]; hma_prev = hma_series.iloc[-2]
+            if hma_val > hma_prev: bull_confluences += 1; signal_details_pine['HMA'] = "▲"
+            elif hma_val < hma_prev: bear_confluences += 1; signal_details_pine['HMA'] = "▼"
+            else: signal_details_pine['HMA'] = "─"
+        else: signal_details_pine['HMA'] = "N/A"
+    except Exception as e: signal_details_pine['HMA'] = "ErrHMA"; print(f"Erreur HMA: {e}")
+    try: # 2. RSI
+        rsi_series = rsi_pine(ohlc4, 10)
+        if len(rsi_series) >=1 and not pd.isna(rsi_series.iloc[-1]):
+            rsi_val = rsi_series.iloc[-1]; signal_details_pine['RSI_val'] = f"{rsi_val:.0f}"
+            if rsi_val > 50: bull_confluences += 1; signal_details_pine['RSI'] = f"▲({rsi_val:.0f})"
+            elif rsi_val < 50: bear_confluences += 1; signal_details_pine['RSI'] = f"▼({rsi_val:.0f})"
+            else: signal_details_pine['RSI'] = f"─({rsi_val:.0f})"
+        else: signal_details_pine['RSI'] = "N/A"
+    except Exception as e: signal_details_pine['RSI'] = "ErrRSI"; signal_details_pine['RSI_val'] = "N/A"; print(f"Erreur RSI: {e}")
+    try: # 3. ADX
+        adx_series = adx_pine(high, low, close, 14)
+        if len(adx_series) >= 1 and not pd.isna(adx_series.iloc[-1]):
+            adx_val = adx_series.iloc[-1]; signal_details_pine['ADX_val'] = f"{adx_val:.0f}"
+            if adx_val >= 20: bull_confluences += 1; bear_confluences += 1; signal_details_pine['ADX'] = f"✔({adx_val:.0f})"
+            else: signal_details_pine['ADX'] = f"✖({adx_val:.0f})"
+        else: signal_details_pine['ADX'] = "N/A"
+    except Exception as e: signal_details_pine['ADX'] = "ErrADX"; signal_details_pine['ADX_val'] = "N/A"; print(f"Erreur ADX: {e}")
+    try: # 4. Heiken Ashi
+        ha_open, ha_close = heiken_ashi_pine(data)
+        if len(ha_open) >=1 and len(ha_close) >=1 and not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
+            if ha_close.iloc[-1] > ha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['HA'] = "▲"
+            elif ha_close.iloc[-1] < ha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['HA'] = "▼"
+            else: signal_details_pine['HA'] = "─"
+        else: signal_details_pine['HA'] = "N/A"
+    except Exception as e: signal_details_pine['HA'] = "ErrHA"; print(f"Erreur HA: {e}")
+    try: # 5. Smoothed Heiken Ashi
+        sha_open, sha_close = smoothed_heiken_ashi_pine(data, 10, 10)
+        if len(sha_open) >=1 and len(sha_close) >=1 and not pd.isna(sha_open.iloc[-1]) and not pd.isna(sha_close.iloc[-1]):
+            if sha_close.iloc[-1] > sha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['SHA'] = "▲"
+            elif sha_close.iloc[-1] < sha_open.iloc[-1]: bear_confluences += 1; signal_details_pine['SHA'] = "▼"
+            else: signal_details_pine['SHA'] = "─"
+        else: signal_details_pine['SHA'] = "N/A"
+    except Exception as e: signal_details_pine['SHA'] = "ErrSHA"; print(f"Erreur SHA: {e}")
+    try: # 6. Ichimoku
+        ichimoku_signal_val = ichimoku_pine_signal(high, low, close)
+        if ichimoku_signal_val == 1: bull_confluences += 1; signal_details_pine['Ichi'] = "▲"
+        elif ichimoku_signal_val == -1: bear_confluences += 1; signal_details_pine['Ichi'] = "▼"
+        elif ichimoku_signal_val == 0 and (len(data) < max(9,26,52) or (len(data) > 0 and pd.isna(data['Close'].iloc[-1]))): signal_details_pine['Ichi'] = "N/D"
+        else: signal_details_pine['Ichi'] = "─"
+    except Exception as e: signal_details_pine['Ichi'] = "ErrIchi"; print(f"Erreur Ichi: {e}")
+    confluence_value=max(bull_confluences,bear_confluences)
+    direction="NEUTRE"
+    if bull_confluences > bear_confluences: direction="HAUSSIER"
+    elif bear_confluences > bull_confluences: direction="BAISSIER"
+    elif bull_confluences == bear_confluences and bull_confluences > 0: direction="CONFLIT"
+    return{'confluence_P':confluence_value,'direction_P':direction,'bull_P':bull_confluences,'bear_P':bear_confluences,
+            'rsi_P':signal_details_pine.get('RSI_val',"N/A"),'adx_P':signal_details_pine.get('ADX_val',"N/A"),
+            'signals_P':signal_details_pine}
 
 def get_stars_pine(confluence_value):
     if confluence_value == 6: return "⭐⭐⭐⭐⭐⭐"
@@ -210,35 +186,23 @@ def get_stars_pine(confluence_value):
     elif confluence_value == 1: return "⭐"
     else: return "WAIT"
 
-# --- Interface Utilisateur ---
 col1,col2=st.columns([1,3])
 with col1:
     st.subheader("⚙️ Paramètres");min_conf=st.selectbox("Confluence min (0-6)",options=[0,1,2,3,4,5,6],index=3,format_func=lambda x:f"{x} (confluence)")
-    show_all=st.checkbox("Voir toutes les paires (ignorer filtre)");
-    scan_dis_fh = FINNHUB_API_KEY is None; # Désactiver si la clé Finnhub n'est pas chargée
-    scan_tip_fh="Clé Finnhub non chargée." if scan_dis_fh else "Lancer scan (Finnhub)"
+    show_all=st.checkbox("Voir toutes les paires (ignorer filtre)");scan_dis_fh=FINNHUB_API_KEY is None;scan_tip_fh="Clé Finnhub non chargée." if scan_dis_fh else "Lancer scan (Finnhub)"
     scan_btn=st.button("🔍 Scanner (Données Finnhub H1)",type="primary",use_container_width=True,disabled=scan_dis_fh,help=scan_tip_fh)
-
 with col2:
     if scan_btn:
         st.info(f"🔄 Scan en cours (Finnhub H1)...");pr_res=[];pb=st.progress(0);stx=st.empty()
-        for i,pair_str_fh in enumerate(FOREX_PAIRS_FINNHUB): # Utiliser la nouvelle liste
-            pnd=pair_str_fh.replace('/', '').replace('_',''); # Nom affiché simple: EURUSD
-            cp=(i+1)/len(FOREX_PAIRS_FINNHUB);pb.progress(cp);stx.text(f"Analyse (Finnhub H1):{pnd}({i+1}/{len(FOREX_PAIRS_FINNHUB)})")
-            
-            # Appel à get_data_finnhub. Résolution '60' pour H1.
+        for i,pair_str_fh in enumerate(FOREX_PAIRS_FINNHUB): 
+            pnd=pair_str_fh.replace('/','').replace('_','');cp=(i+1)/len(FOREX_PAIRS_FINNHUB);pb.progress(cp);stx.text(f"Analyse (Finnhub H1):{pnd}({i+1}/{len(FOREX_PAIRS_FINNHUB)})")
             d_h1_fh = get_data_finnhub(pair_str_fh, resolution_fh="60", num_days_history=30) 
-            
             if d_h1_fh is not None:
                 sigs=calculate_all_signals_pine(d_h1_fh)
                 if sigs:strs=get_stars_pine(sigs['confluence_P']);rd={'Paire':pnd,'Direction':sigs['direction_P'],'Conf. (0-6)':sigs['confluence_P'],'Étoiles':strs,'RSI':sigs['rsi_P'],'ADX':sigs['adx_P'],'Bull':sigs['bull_P'],'Bear':sigs['bear_P'],'details':sigs['signals_P']};pr_res.append(rd)
                 else:pr_res.append({'Paire':pnd,'Direction':'ERREUR CALCUL','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Calcul signaux (Finnhub) échoué'}})
             else:pr_res.append({'Paire':pnd,'Direction':'ERREUR DONNÉES FH','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Données Finnhub non dispo/symb invalide(logs serveur)'}})
-            
-            # Limite Finnhub: 60 appels/minute. 1 appel toutes les secondes est sûr.
-            print(f"Pause de 1 seconde pour limite de taux Finnhub...")
-            time.sleep(1.1) 
-            
+            print(f"Pause de 1.1 seconde pour limite de taux Finnhub...");time.sleep(1.1) 
         pb.empty();stx.empty()
         if pr_res:
             dfa=pd.DataFrame(pr_res);dfd=dfa[dfa['Conf. (0-6)']>=min_conf].copy()if not show_all else dfa.copy()
@@ -257,7 +221,6 @@ with col2:
                         st.divider()
             else:st.warning(f"❌ Aucune paire avec critères filtrage (Finnhub). Vérifiez erreurs données/symbole.")
         else:st.error("❌ Aucune paire traitée (Finnhub). Vérifiez logs serveur.")
-
 with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données Finnhub)"):
     st.markdown("""**6 Signaux Confluence:** HMA(20),RSI(10),ADX(14)>=20,HA(Simple),SHA(10,10),Ichi(9,26,52).**Comptage & Étoiles:**Pine.**Source:**Finnhub API.""")
 st.caption("Scanner H1 (Finnhub). Multi-TF non actif. Attention aux limites de taux de l'API Finnhub.")
