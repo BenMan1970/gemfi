@@ -10,18 +10,33 @@ st.set_page_config(page_title="Scanner Confluence Forex (Finnhub)", page_icon="�
 st.title("🔍 Scanner Confluence Forex Premium (Données Finnhub)")
 st.markdown("*Utilisation de l'API Finnhub pour les données de marché*")
 
+# --- Récupération Clé API et Code Secret Finnhub ---
 FINNHUB_API_KEY = None
+FINNHUB_SECRET_CODE = None # Nouvelle variable pour le code secret
+
 try:
     FINNHUB_API_KEY = st.secrets["FINNHUB_API_KEY"]
 except KeyError:
     st.error("Erreur: Secret 'FINNHUB_API_KEY' non défini. Configurez vos secrets.")
     st.stop()
 
+try:
+    # Essayer de charger le code secret, mais ne pas arrêter l'app s'il n'est pas défini
+    # car il n'est pas utilisé dans l'appel API standard pour le moment.
+    FINNHUB_SECRET_CODE = st.secrets.get("FINNHUB_SECRET_CODE") 
+except Exception as e:
+    st.warning(f"N'a pas pu charger 'FINNHUB_SECRET_CODE' depuis les secrets: {e}. Continuons sans...")
+
 if not FINNHUB_API_KEY: 
     st.error("Clé API Finnhub non disponible après la lecture des secrets.")
-    st.stop() # Arrêter si la clé n'est pas chargée
+    st.stop() 
 else:
     st.sidebar.success("Clé API Finnhub chargée.")
+    if FINNHUB_SECRET_CODE:
+        st.sidebar.info("Code Secret Finnhub chargé (actuellement non utilisé dans les requêtes standard).")
+    else:
+        st.sidebar.warning("Code Secret Finnhub non trouvé dans les secrets (si nécessaire, le configurer).")
+
 
 FOREX_PAIRS_FINNHUB = [
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
@@ -70,7 +85,8 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
 
 @st.cache_data(ttl=600) 
 def get_data_finnhub(pair_symbol_fh: str, resolution_fh: str = '60', num_days_history: int = 30):
-    global FINNHUB_API_KEY
+    global FINNHUB_API_KEY # Utilise la clé API principale
+    # FINNHUB_SECRET_CODE est chargé mais non utilisé dans cet appel standard.
     if FINNHUB_API_KEY is None: st.error("FATAL: Clé API Finnhub non chargée."); print("FATAL: Clé API Finnhub non chargée."); return None
     to_timestamp = int(datetime.now(timezone.utc).timestamp())
     from_timestamp = int((datetime.now(timezone.utc) - timedelta(days=num_days_history)).timestamp())
@@ -78,7 +94,7 @@ def get_data_finnhub(pair_symbol_fh: str, resolution_fh: str = '60', num_days_hi
     print(f"\n--- Début get_data_finnhub: sym='{formatted_symbol}', res='{resolution_fh}', from={from_timestamp}, to={to_timestamp} ---")
     base_url = "https://finnhub.io/api/v1/forex/candle"
     params = {"symbol": formatted_symbol, "resolution": resolution_fh, "from": from_timestamp, "to": to_timestamp, "token": FINNHUB_API_KEY}
-    response = None # Initialiser pour le bloc finally
+    response = None 
     try:
         response = requests.get(base_url, params=params)
         response.raise_for_status() 
@@ -105,7 +121,7 @@ def get_data_finnhub(pair_symbol_fh: str, resolution_fh: str = '60', num_days_hi
         st.error(f"Erreur inattendue get_data_finnhub pour {formatted_symbol}: {type(e).__name__}")
         st.exception(e); print(f"ERREUR INATTENDUE get_data_finnhub {formatted_symbol}:\n{traceback.format_exc()}"); return None
 
-# --- Fonction calculate_all_signals_pine (CORRIGÉE pour indentation et syntaxe) ---
+# --- Fonction calculate_all_signals_pine (Version correctement indentée) ---
 def calculate_all_signals_pine(data):
     if data is None or len(data) < 60:
         print(f"calculate_all_signals: Données non fournies ou trop courtes ({len(data) if data is not None else 'None'} lignes).")
@@ -114,11 +130,9 @@ def calculate_all_signals_pine(data):
     if not all(col in data.columns for col in required_cols):
         print(f"calculate_all_signals: Colonnes OHLC manquantes.")
         return None
-    
     close = data['Close']; high = data['High']; low = data['Low']; open_price = data['Open']
     ohlc4 = (open_price + high + low + close) / 4
     bull_confluences, bear_confluences, signal_details_pine = 0, 0, {}
-
     try: # 1. HMA
         hma_series = hull_ma_pine(close, 20)
         if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
@@ -224,3 +238,4 @@ with col2:
 with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données Finnhub)"):
     st.markdown("""**6 Signaux Confluence:** HMA(20),RSI(10),ADX(14)>=20,HA(Simple),SHA(10,10),Ichi(9,26,52).**Comptage & Étoiles:**Pine.**Source:**Finnhub API.""")
 st.caption("Scanner H1 (Finnhub). Multi-TF non actif. Attention aux limites de taux de l'API Finnhub.")
+   
